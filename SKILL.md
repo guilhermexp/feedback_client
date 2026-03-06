@@ -661,15 +661,89 @@ import { ClientFeedback } from './feedback';
 <ClientFeedback />
 ```
 
-### 6. Criar API route para envio
+### 6. Configurar variaveis de ambiente
 
-Adaptar ao framework do projeto:
+Adicionar ao `.env` do projeto (ou `.env.local` em Next.js):
 
-#### Express (Node.js)
+```env
+# Suna Feedback Integration
+SUNA_API_URL=https://suna-api.claudedokploy.com/api
+SUNA_API_KEY=PUBLIC_KEY:SECRET_KEY
+SUNA_PROJECT_ID=uuid-do-projeto-no-suna
+```
 
-```javascript
+**Como obter:**
+- `SUNA_API_KEY`: Criar em Suna > Settings > API Keys (formato `public:secret`)
+- `SUNA_PROJECT_ID`: ID do projeto no Suna (UUID). Copiar da URL do projeto no dashboard
+
+### 7. Criar API route para envio ao Suna
+
+A API route recebe o feedback do widget e encaminha pro Suna como nota vinculada ao projeto.
+
+#### Next.js App Router (`src/app/api/feedback/route.ts`)
+
+```typescript
+import { NextRequest, NextResponse } from 'next/server';
+
+const SUNA_API_URL = process.env.SUNA_API_URL;
+const SUNA_API_KEY = process.env.SUNA_API_KEY;
+const SUNA_PROJECT_ID = process.env.SUNA_PROJECT_ID;
+
+export async function POST(request: NextRequest) {
+  try {
+    const { markdown, pageUrl, annotations } = await request.json();
+
+    if (!markdown) {
+      return NextResponse.json({ error: 'Markdown content is required' }, { status: 400 });
+    }
+
+    // Se Suna estiver configurado, enviar como nota vinculada ao projeto
+    if (SUNA_API_URL && SUNA_API_KEY && SUNA_PROJECT_ID) {
+      const sunaResponse = await fetch(`${SUNA_API_URL}/notes/capture`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': SUNA_API_KEY,
+        },
+        body: JSON.stringify({
+          title: `Feedback: ${pageUrl}`,
+          content: markdown,
+          project_id: SUNA_PROJECT_ID,
+          note_type: 'general',
+        }),
+      });
+
+      if (!sunaResponse.ok) {
+        const err = await sunaResponse.text();
+        console.error('[Feedback] Suna API error:', sunaResponse.status, err);
+        return NextResponse.json(
+          { error: 'Failed to send feedback to project' },
+          { status: 502 }
+        );
+      }
+
+      const note = await sunaResponse.json();
+      return NextResponse.json({
+        success: true,
+        noteId: note.id,
+        message: 'Feedback enviado e vinculado ao projeto',
+      });
+    }
+
+    // Fallback: logar localmente se Suna nao estiver configurado
+    console.log('[Feedback]', { pageUrl, count: annotations?.length });
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error('Feedback API error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}
+```
+
+#### Express / Hono (Node.js)
+
+```typescript
 import { Router } from 'express';
-import logger from '../lib/logger.mjs';
 
 const router = Router();
 
@@ -681,19 +755,42 @@ router.post('/api/feedback', async (req, res) => {
       return res.status(400).json({ error: 'Markdown content is required' });
     }
 
-    // Adaptar: salvar no banco, enviar para servico externo, etc.
-    logger.info(
-      { pageUrl, annotationsCount: annotations?.length || 0 },
-      '[Feedback] Client feedback received'
-    );
+    const { SUNA_API_URL, SUNA_API_KEY, SUNA_PROJECT_ID } = process.env;
 
-    return res.json({
-      success: true,
-      message: 'Feedback received',
-      annotationsCount: annotations?.length || 0,
-    });
+    if (SUNA_API_URL && SUNA_API_KEY && SUNA_PROJECT_ID) {
+      const sunaResponse = await fetch(`${SUNA_API_URL}/notes/capture`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': SUNA_API_KEY,
+        },
+        body: JSON.stringify({
+          title: `Feedback: ${pageUrl}`,
+          content: markdown,
+          project_id: SUNA_PROJECT_ID,
+          note_type: 'general',
+        }),
+      });
+
+      if (!sunaResponse.ok) {
+        const err = await sunaResponse.text();
+        console.error('[Feedback] Suna API error:', sunaResponse.status, err);
+        return res.status(502).json({ error: 'Failed to send feedback to project' });
+      }
+
+      const note = await sunaResponse.json();
+      return res.json({
+        success: true,
+        noteId: note.id,
+        message: 'Feedback enviado e vinculado ao projeto',
+      });
+    }
+
+    // Fallback
+    console.log('[Feedback]', { pageUrl, count: annotations?.length });
+    return res.json({ success: true });
   } catch (error) {
-    logger.error({ err: error }, '[Feedback] Failed to process feedback');
+    console.error('[Feedback] Error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -706,30 +803,7 @@ export function registerFeedbackRoutes(app) {
 Lembrar de:
 - Registrar a rota no app principal (ex: `registerFeedbackRoutes(app)`)
 - Adicionar `/api/feedback` nas rotas protegidas se o projeto usar auth/CSRF
-
-#### Next.js App Router (`src/app/api/feedback/route.ts`)
-
-```typescript
-import { NextRequest, NextResponse } from 'next/server';
-
-export async function POST(request: NextRequest) {
-  try {
-    const { markdown, pageUrl, annotations } = await request.json();
-
-    if (!markdown) {
-      return NextResponse.json({ error: 'Markdown content is required' }, { status: 400 });
-    }
-
-    // Adaptar: salvar no banco, enviar para servico externo, etc.
-    console.log('[Feedback]', { pageUrl, count: annotations?.length });
-
-    return NextResponse.json({ success: true });
-  } catch (error) {
-    console.error('Feedback API error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
-  }
-}
-```
+- **Nunca expor** `SUNA_API_KEY` no client-side (manter so em server env)
 
 ## Fluxo do Usuario
 
@@ -738,8 +812,20 @@ export async function POST(request: NextRequest) {
 3. Clica para ativar modo de anotacao (botao fica roxo)
 4. Clica em elementos da pagina e deixa comentarios
 5. Abre painel lateral para ver/gerenciar anotacoes
-6. Pode exportar (.md), copiar, ou enviar via API
+6. Clica "Enviar" → feedback vai pro Suna como nota vinculada ao projeto
 7. Desativa o toggle em Configuracoes para esconder o botao
+
+## Fluxo Tecnico (Envio)
+
+```
+Widget (client-side) → POST /api/feedback (server route do app)
+  → POST SUNA_API_URL/notes/capture (server-to-server)
+    → Nota criada no Suna, vinculada ao SUNA_PROJECT_ID
+```
+
+- A API key fica **server-side** (nunca exposta ao browser)
+- O `project_id` eh fixo por app/projeto — toda nota de feedback chega vinculada
+- O Suna converte o markdown pra formato Plate automaticamente
 
 ## Ativacao
 
@@ -749,6 +835,17 @@ export async function POST(request: NextRequest) {
 - Usuario ativa/desativa quando quiser
 - Nao aparece nada no front-end ate o usuario ativar
 
+## Integracao Suna
+
+Para que o feedback chegue como nota no Suna vinculada a um projeto:
+
+1. **Criar API Key no Suna:** Settings > API Keys > Criar nova key
+2. **Copiar o Project ID:** URL do projeto no Suna (UUID)
+3. **Configurar .env** com `SUNA_API_URL`, `SUNA_API_KEY`, `SUNA_PROJECT_ID`
+4. A API route faz o forward automaticamente
+
+Se as env vars nao estiverem configuradas, o feedback eh logado localmente como fallback.
+
 ## Notes
 
 - Anotacoes persistem em localStorage por pagina
@@ -757,3 +854,5 @@ export async function POST(request: NextRequest) {
 - Toggle switch usa CSS puro com Tailwind (adaptar se projeto nao usa Tailwind)
 - Compativel com React 18+ e Next.js 13+
 - Se o projeto tiver CSRF protection, adaptar o fetch no `handleSend` para incluir o token
+- Endpoint Suna: `POST /notes/capture` aceita `{ title, content (markdown), project_id, note_type }`
+- Auth Suna: header `x-api-key` com formato `public_key:secret_key`
